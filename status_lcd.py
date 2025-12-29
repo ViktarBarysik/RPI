@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
-import os, time, json, socket, shutil, subprocess
+import os
+import time
+import json
+import socket
+import shutil
+import subprocess
 from datetime import datetime
 
 import requests
 from PIL import Image, ImageDraw, ImageFont
 
+# ---- Settings ----
 FB_DEV = "/dev/fb0"
 IMG_PATH = "/tmp/lcd_dashboard.png"
 CACHE_PATH = "/tmp/batumi_weather_cache.json"
@@ -12,8 +18,8 @@ CACHE_PATH = "/tmp/batumi_weather_cache.json"
 BATUMI_LAT = 41.6168
 BATUMI_LON = 41.6367
 
-REFRESH_EVERY_SEC = 10
-WEATHER_REFRESH_SEC = 10 * 60
+REFRESH_EVERY_SEC = 10          # redraw interval
+WEATHER_REFRESH_SEC = 10 * 60   # refresh weather every 10 minutes
 
 WEATHER_CODE = {
     0: ("Clear", "sun"),
@@ -25,27 +31,36 @@ WEATHER_CODE = {
     51: ("Drizzle", "rain"),
     53: ("Drizzle", "rain"),
     55: ("Drizzle", "rain"),
+    56: ("Freezing drizzle", "rain"),
+    57: ("Freezing drizzle", "rain"),
     61: ("Rain", "rain"),
     63: ("Rain", "rain"),
     65: ("Heavy rain", "rain"),
+    66: ("Freezing rain", "rain"),
+    67: ("Freezing rain", "rain"),
     71: ("Snow", "snow"),
     73: ("Snow", "snow"),
     75: ("Heavy snow", "snow"),
+    77: ("Snow grains", "snow"),
     80: ("Showers", "rain"),
     81: ("Showers", "rain"),
     82: ("Showers", "rain"),
+    85: ("Snow showers", "snow"),
+    86: ("Snow showers", "snow"),
     95: ("Thunderstorm", "thunder"),
-    96: ("Thunderstorm", "thunder"),
-    99: ("Thunderstorm", "thunder"),
+    96: ("Thunderstorm hail", "thunder"),
+    99: ("Thunderstorm hail", "thunder"),
 }
 
+FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+FONT_REG  = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+
+
+# ---- Helpers ----
 def fb_geometry():
-    """
-    Return (W,H) detected from fbset. Fallback (480,320).
-    """
+    """Return (W,H) detected from fbset. Fallback (480,320)."""
     try:
         out = subprocess.check_output(["fbset", "-fb", FB_DEV, "-s"], text=True, timeout=2)
-        # line like: geometry 320 480 320 480 16
         for line in out.splitlines():
             line = line.strip()
             if line.startswith("geometry"):
@@ -55,6 +70,7 @@ def fb_geometry():
     except Exception:
         pass
     return 480, 320
+
 
 def get_local_ip():
     try:
@@ -66,11 +82,13 @@ def get_local_ip():
     except Exception:
         return "N/A"
 
+
 def get_public_ip():
     try:
         return requests.get("https://api.ipify.org", timeout=5).text.strip()
     except Exception:
         return "N/A"
+
 
 def get_default_iface():
     try:
@@ -82,6 +100,7 @@ def get_default_iface():
         pass
     return "N/A"
 
+
 def iface_is_up(iface: str) -> bool:
     try:
         path = f"/sys/class/net/{iface}/operstate"
@@ -91,6 +110,7 @@ def iface_is_up(iface: str) -> bool:
         pass
     return False
 
+
 def read_cpu_temp_c():
     try:
         t = int(open("/sys/class/thermal/thermal_zone0/temp", "r").read().strip())
@@ -98,13 +118,16 @@ def read_cpu_temp_c():
     except Exception:
         return None
 
+
 def read_load():
     try:
         return os.getloadavg()
     except Exception:
         return None
 
+
 def read_mem():
+    """returns (used_mb, total_mb)"""
     try:
         meminfo = open("/proc/meminfo", "r").read().splitlines()
         m = {}
@@ -118,7 +141,9 @@ def read_mem():
     except Exception:
         return None
 
+
 def read_disk_root():
+    """returns (used_gb, total_gb)"""
     try:
         du = shutil.disk_usage("/")
         used = du.used / (1024**3)
@@ -126,6 +151,7 @@ def read_disk_root():
         return used, total
     except Exception:
         return None
+
 
 def fetch_batumi_weather():
     url = "https://api.open-meteo.com/v1/forecast"
@@ -145,7 +171,9 @@ def fetch_batumi_weather():
     desc, icon = WEATHER_CODE.get(code, (f"Code {code}", "cloud"))
     return {"ts": int(time.time()), "temp": temp, "wind": wind, "code": code, "desc": desc, "icon": icon}
 
+
 def get_batumi_weather_cached():
+    # valid cache?
     try:
         if os.path.exists(CACHE_PATH):
             cache = json.load(open(CACHE_PATH, "r"))
@@ -153,11 +181,14 @@ def get_batumi_weather_cached():
                 return cache
     except Exception:
         pass
+
+    # fetch + cache
     try:
         w = fetch_batumi_weather()
         json.dump(w, open(CACHE_PATH, "w"))
         return w
     except Exception:
+        # fallback to stale cache
         try:
             if os.path.exists(CACHE_PATH):
                 return json.load(open(CACHE_PATH, "r"))
@@ -165,65 +196,69 @@ def get_batumi_weather_cached():
             pass
         return {"temp": None, "wind": None, "code": None, "desc": "N/A", "icon": "cloud"}
 
+
 def clamp(s: str, maxlen: int):
     s = s if s is not None else ""
-    return (s[:maxlen-1] + "…") if len(s) > maxlen else s
+    return (s[:maxlen - 1] + "…") if len(s) > maxlen else s
+
 
 def draw_bar(draw, x, y, w, h, frac):
-    draw.rectangle([x, y, x+w, y+h], outline="gray", width=2)
+    draw.rectangle([x, y, x + w, y + h], outline="gray", width=2)
     frac = max(0.0, min(1.0, frac))
-    draw.rectangle([x+2, y+2, x+2+int((w-4)*frac), y+h-2], fill="white")
+    draw.rectangle([x + 2, y + 2, x + 2 + int((w - 4) * frac), y + h - 2], fill="white")
 
-# --- Weather icons (simple vector-ish) ---
+
+# ---- Weather icons (simple vector) ----
 def icon_sun(d, x, y, s):
     r = s // 3
-    d.ellipse([x+r, y+r, x+s-r, y+s-r], outline="yellow", width=4)
-    # rays
-    cx, cy = x + s//2, y + s//2
-    for dx, dy in [(0,-1),(1,0),(0,1),(-1,0),(1,-1),(1,1),(-1,1),(-1,-1)]:
-        d.line([cx, cy, cx + dx*(s//2), cy + dy*(s//2)], fill="yellow", width=3)
+    d.ellipse([x + r, y + r, x + s - r, y + s - r], outline="yellow", width=4)
+    cx, cy = x + s // 2, y + s // 2
+    for dx, dy in [(0, -1), (1, 0), (0, 1), (-1, 0), (1, -1), (1, 1), (-1, 1), (-1, -1)]:
+        d.line([cx, cy, cx + dx * (s // 2), cy + dy * (s // 2)], fill="yellow", width=3)
+
 
 def icon_cloud(d, x, y, s):
-    # simple cloud from circles + base
-    d.ellipse([x+s*0.05, y+s*0.40, x+s*0.45, y+s*0.85], outline="white", width=3)
-    d.ellipse([x+s*0.25, y+s*0.20, x+s*0.70, y+s*0.80], outline="white", width=3)
-    d.ellipse([x+s*0.55, y+s*0.40, x+s*0.95, y+s*0.85], outline="white", width=3)
-    d.rectangle([x+s*0.12, y+s*0.60, x+s*0.88, y+s*0.88], outline="white", width=3)
+    d.ellipse([x + s * 0.05, y + s * 0.40, x + s * 0.45, y + s * 0.85], outline="white", width=3)
+    d.ellipse([x + s * 0.25, y + s * 0.20, x + s * 0.70, y + s * 0.80], outline="white", width=3)
+    d.ellipse([x + s * 0.55, y + s * 0.40, x + s * 0.95, y + s * 0.85], outline="white", width=3)
+    d.rectangle([x + s * 0.12, y + s * 0.60, x + s * 0.88, y + s * 0.88], outline="white", width=3)
+
 
 def icon_rain(d, x, y, s):
     icon_cloud(d, x, y, s)
     for i in range(4):
-        xx = x + int(s*(0.22 + i*0.18))
-        d.line([xx, y+int(s*0.88), xx-8, y+s+10], fill="cyan", width=3)
+        xx = x + int(s * (0.22 + i * 0.18))
+        d.line([xx, y + int(s * 0.88), xx - 8, y + s + 12], fill="cyan", width=3)
+
 
 def icon_thunder(d, x, y, s):
     icon_cloud(d, x, y, s)
-    # lightning bolt
     bolt = [
-        (x+int(s*0.55), y+int(s*0.85)),
-        (x+int(s*0.45), y+int(s*1.05)),
-        (x+int(s*0.58), y+int(s*1.05)),
-        (x+int(s*0.42), y+int(s*1.28)),
+        (x + int(s * 0.55), y + int(s * 0.85)),
+        (x + int(s * 0.45), y + int(s * 1.05)),
+        (x + int(s * 0.58), y + int(s * 1.05)),
+        (x + int(s * 0.42), y + int(s * 1.28)),
     ]
     d.line(bolt, fill="yellow", width=4)
 
+
 def icon_snow(d, x, y, s):
     icon_cloud(d, x, y, s)
-    # simple snowflakes
     for i in range(3):
-        cx = x + int(s*(0.30 + i*0.22))
-        cy = y + int(s*1.05)
-        d.line([cx-10, cy, cx+10, cy], fill="white", width=2)
-        d.line([cx, cy-10, cx, cy+10], fill="white", width=2)
-        d.line([cx-7, cy-7, cx+7, cy+7], fill="white", width=2)
-        d.line([cx-7, cy+7, cx+7, cy-7], fill="white", width=2)
+        cx = x + int(s * (0.30 + i * 0.22))
+        cy = y + int(s * 1.05)
+        d.line([cx - 10, cy, cx + 10, cy], fill="white", width=2)
+        d.line([cx, cy - 10, cx, cy + 10], fill="white", width=2)
+        d.line([cx - 7, cy - 7, cx + 7, cy + 7], fill="white", width=2)
+        d.line([cx - 7, cy + 7, cx + 7, cy - 7], fill="white", width=2)
+
 
 def draw_weather_icon(d, kind, x, y, s):
     if kind == "sun":
         icon_sun(d, x, y, s)
     elif kind == "cloud_sun":
         icon_sun(d, x, y, s)
-        icon_cloud(d, x+int(s*0.20), y+int(s*0.25), s)
+        icon_cloud(d, x + int(s * 0.20), y + int(s * 0.25), s)
     elif kind == "rain":
         icon_rain(d, x, y, s)
     elif kind == "thunder":
@@ -233,24 +268,41 @@ def draw_weather_icon(d, kind, x, y, s):
     else:
         icon_cloud(d, x, y, s)
 
+
+# ---- Main render ----
 def render_once():
     W, H = fb_geometry()
 
-    # Fonts scaled for both 480x320 and 320x480
+    # layout tuning depending on orientation
+    pad = 12
     if W >= 480 and H <= 320:
-        title_sz, med_sz, sm_sz = 36, 22, 18
-        icon_size = 80
-        pad = 14
+        title_sz = 34
+        med_sz = 22
+        sm_sz = 18
+        clock_sz = 58
+        date_sz = 18
+        icon_size = 125
+        desc_max = 20
     else:
-        title_sz, med_sz, sm_sz = 34, 22, 18
-        icon_size = 90
-        pad = 14
+        # portrait-ish framebuffer
+        title_sz = 34
+        med_sz = 22
+        sm_sz = 18
+        clock_sz = 56
+        date_sz = 18
+        icon_size = 135
+        desc_max = 18
 
-    FONT_TITLE = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", title_sz)
-    FONT_MED   = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", med_sz)
-    FONT_SM    = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", sm_sz)
+    FONT_TITLE = ImageFont.truetype(FONT_BOLD, title_sz)
+    FONT_MED = ImageFont.truetype(FONT_REG, med_sz)
+    FONT_SM = ImageFont.truetype(FONT_REG, sm_sz)
+    FONT_CLOCK = ImageFont.truetype(FONT_BOLD, clock_sz)
+    FONT_DATE = ImageFont.truetype(FONT_REG, date_sz)
 
-    now = datetime.now().strftime("%H:%M:%S  %d %b %Y")
+    # data
+    clock = datetime.now().strftime("%H:%M")
+    date_line = datetime.now().strftime("%d %b %Y")
+
     local_ip = get_local_ip()
     public_ip = get_public_ip()
     iface = get_default_iface()
@@ -262,66 +314,76 @@ def render_once():
     disk = read_disk_root()
     weather = get_batumi_weather_cached()
 
+    # canvas
     img = Image.new("RGB", (W, H), "black")
     d = ImageDraw.Draw(img)
 
-    # Header
+    # header left
     d.text((pad, pad), "Batumi", font=FONT_TITLE, fill="white")
-    d.text((pad, pad + title_sz + 2), now, font=FONT_SM, fill="gray")
 
-    # Weather block (icon + compact text)
-    y_weather = pad + title_sz + 26
-    draw_weather_icon(d, weather.get("icon", "cloud"), W - icon_size - pad, y_weather, icon_size)
+    # big clock top-right
+    clock_w = d.textlength(clock, font=FONT_CLOCK)
+    d.text((W - pad - clock_w, pad - 2), clock, font=FONT_CLOCK, fill="white")
 
-    desc = clamp(weather.get("desc", "N/A"), 22 if W < 480 else 26)
+    # date under clock
+    date_w = d.textlength(date_line, font=FONT_DATE)
+    d.text((W - pad - date_w, pad + clock_sz - 6), date_line, font=FONT_DATE, fill="gray")
+
+    # weather block
+    y_weather = pad + clock_sz + 18
+    icon_x = W - icon_size - pad
+    icon_y = y_weather - 10
+    draw_weather_icon(d, weather.get("icon", "cloud"), icon_x, icon_y, icon_size)
+
+    desc = clamp(weather.get("desc", "N/A"), desc_max)
     temp = weather.get("temp")
     wind = weather.get("wind")
-
     temp_str = f"{temp:.1f}°C" if isinstance(temp, (int, float)) else "N/A"
     wind_str = f"{wind:.0f} km/h" if isinstance(wind, (int, float)) else "N/A"
 
     d.text((pad, y_weather), f"Weather: {desc}", font=FONT_MED, fill="cyan")
     d.text((pad, y_weather + med_sz + 6), f"Temp: {temp_str}", font=FONT_MED, fill="cyan")
-    d.text((pad, y_weather + (med_sz + 6)*2), f"Wind: {wind_str}", font=FONT_MED, fill="cyan")
+    d.text((pad, y_weather + (med_sz + 6) * 2), f"Wind: {wind_str}", font=FONT_MED, fill="cyan")
 
-    # Network block
-    y_net = y_weather + (med_sz + 6)*3 + 10
+    # network block (short labels)
+    y_net = y_weather + (med_sz + 6) * 3 + 10
     d.text((pad, y_net), f"IF: {iface} ({link})", font=FONT_SM, fill="white")
-    d.text((pad, y_net + sm_sz + 6), f"LAN : {clamp(local_ip, 32)}", font=FONT_SM, fill="white")
-    d.text((pad, y_net + (sm_sz + 6)*2), f"WAN : {clamp(public_ip, 32)}", font=FONT_SM, fill="white")
+    d.text((pad, y_net + sm_sz + 6), f"LAN: {clamp(local_ip, 28)}", font=FONT_SM, fill="white")
+    d.text((pad, y_net + (sm_sz + 6) * 2), f"WAN: {clamp(public_ip, 28)}", font=FONT_SM, fill="white")
 
-    # System block (bars)
-    y_sys = y_net + (sm_sz + 6)*3 + 8
-    if cpu_t is not None:
-        d.text((pad, y_sys), f"CPU: {cpu_t:.1f}°C", font=FONT_SM, fill="white")
-    else:
-        d.text((pad, y_sys), "CPU: N/A", font=FONT_SM, fill="white")
-
+    # system block (bars)
+    y_sys = y_net + (sm_sz + 6) * 3 + 8
+    cpu_str = f"{cpu_t:.1f}°C" if cpu_t is not None else "N/A"
+    d.text((pad, y_sys), f"CPU: {cpu_str}", font=FONT_SM, fill="white")
     if load is not None:
         d.text((pad + 160, y_sys), f"Load: {load[0]:.2f}", font=FONT_SM, fill="white")
 
     y_sys2 = y_sys + sm_sz + 8
+    bar_x = pad + 175
+    bar_w = max(80, W - bar_x - pad)
+
     if mem is not None:
         used, total = mem
         frac = used / total if total > 0 else 0
         d.text((pad, y_sys2), f"RAM: {used:.0f}/{total:.0f}MB", font=FONT_SM, fill="white")
-        draw_bar(d, pad + 180, y_sys2 + 4, W - (pad + 180) - pad, 16, frac)
+        draw_bar(d, bar_x, y_sys2 + 4, bar_w, 16, frac)
 
     y_sys3 = y_sys2 + sm_sz + 10
     if disk is not None:
         used_g, total_g = disk
         frac = used_g / total_g if total_g > 0 else 0
         d.text((pad, y_sys3), f"Disk: {used_g:.1f}/{total_g:.1f}GB", font=FONT_SM, fill="white")
-        draw_bar(d, pad + 180, y_sys3 + 4, W - (pad + 180) - pad, 16, frac)
+        draw_bar(d, bar_x, y_sys3 + 4, bar_w, 16, frac)
 
     img.save(IMG_PATH)
 
-    # IMPORTANT: no "-a" to avoid scaling/cropping
+    # IMPORTANT: no "-a" (avoid scaling/cropping)
     subprocess.run(
         ["fbi", "-T", "1", "-d", FB_DEV, "-noverbose", IMG_PATH],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
     )
+
 
 def main():
     while True:
@@ -330,6 +392,7 @@ def main():
         except Exception:
             pass
         time.sleep(REFRESH_EVERY_SEC)
+
 
 if __name__ == "__main__":
     main()
