@@ -175,14 +175,19 @@ def get_public_ip_cached():
         if os.path.exists(CACHE_PUBLIC_IP):
             c = json.load(open(CACHE_PUBLIC_IP, "r"))
             if int(time.time()) - int(c.get("ts", 0)) < PUBLIC_IP_REFRESH_SEC:
-                return c.get("ip", "N/A")
+                ip = c.get("ip", "N/A")
+                if ip and ip != "N/A":
+                    return ip
     except Exception:
         pass
 
-    # fetch
     ip = "N/A"
     try:
-        ip = SESSION.get("https://api.ipify.org", timeout=5).text.strip()
+        r = SESSION.get("https://2ip.io", timeout=6, headers={"User-Agent": "curl/8.0"})
+        cand = r.text.strip()
+        # basic sanity check
+        if cand and (("." in cand) or (":" in cand)) and len(cand) < 80:
+            ip = cand
     except Exception:
         pass
 
@@ -191,6 +196,7 @@ def get_public_ip_cached():
         json.dump({"ts": int(time.time()), "ip": ip}, open(CACHE_PUBLIC_IP, "w"))
     except Exception:
         pass
+
     return ip
 
 
