@@ -427,10 +427,10 @@ def render_loop():
         d.text((W - pad - date_w, pad + cfg["clock_sz"] - 6), date_line, font=cfg["FONT_DATE"], fill="gray")
 
         # weather block
-        y_weather = pad + cfg["clock_sz"] + 18
+        y_weather = pad + cfg["clock_sz"] + 8
         icon_size = cfg["icon_size"]
         icon_x = W - icon_size - pad
-        icon_y = y_weather - 10
+        icon_y = y_weather + 4
         draw_weather_icon(d, weather.get("icon", "cloud"), icon_x, icon_y, icon_size)
 
         desc = clamp(weather.get("desc", "N/A"), cfg["desc_max"])
@@ -450,13 +450,13 @@ def render_loop():
         d.text((pad, y_net + (cfg["sm_sz"] + 6) * 2), f"WAN: {clamp(public_ip, 28)}", font=cfg["FONT_SM"], fill="white")
 
         # system
-        y_sys = y_net + (cfg["sm_sz"] + 6) * 3 + 8
+        y_sys = y_net + (cfg["sm_sz"] + 6) * 3 + 6
         cpu_str = f"{cpu_t:.1f}°C" if cpu_t is not None else "N/A"
         d.text((pad, y_sys), f"CPU: {cpu_str}", font=cfg["FONT_SM"], fill="white")
         if load is not None:
             d.text((pad + 160, y_sys), f"Load: {load[0]:.2f}", font=cfg["FONT_SM"], fill="white")
 
-        y_sys2 = y_sys + cfg["sm_sz"] + 8
+        y_sys2 = y_sys + cfg["sm_sz"] + 6
         bar_x = pad + 175
         bar_w = max(80, W - bar_x - pad)
 
@@ -466,7 +466,7 @@ def render_loop():
             d.text((pad, y_sys2), f"RAM: {used:.0f}/{total:.0f}MB", font=cfg["FONT_SM"], fill="white")
             draw_bar(d, bar_x, y_sys2 + 4, bar_w, 16, frac)
 
-        y_sys3 = y_sys2 + cfg["sm_sz"] + 10
+        y_sys3 = y_sys2 + cfg["sm_sz"] + 8
         if disk is not None:
             used_g, total_g = disk
             frac = used_g / total_g if total_g > 0 else 0

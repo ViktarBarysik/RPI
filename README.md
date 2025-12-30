@@ -1,3 +1,8 @@
+#GENERAL
+
+This script is for SPI GPIO (480x320) Display status output
+
+
 ##INSTALL PREREQS
 
 sudo apt update
