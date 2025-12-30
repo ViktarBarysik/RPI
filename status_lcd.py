@@ -12,14 +12,15 @@ from PIL import Image, ImageDraw, ImageFont
 
 # ---- Settings ----
 FB_DEV = "/dev/fb0"
-IMG_PATH = "/tmp/lcd_dashboard.png"
-CACHE_PATH = "/tmp/batumi_weather_cache.json"
+CACHE_WEATHER = "/tmp/batumi_weather_cache.json"
+CACHE_PUBLIC_IP = "/tmp/public_ip_cache.json"
 
 BATUMI_LAT = 41.6168
 BATUMI_LON = 41.6367
 
-REFRESH_EVERY_SEC = 10          # redraw interval
-WEATHER_REFRESH_SEC = 10 * 60   # refresh weather every 10 minutes
+REFRESH_EVERY_SEC = 10          # screen redraw
+WEATHER_REFRESH_SEC = 10 * 60   # weather cache
+PUBLIC_IP_REFRESH_SEC = 10 * 60 # public IP cache
 
 WEATHER_CODE = {
     0: ("Clear", "sun"),
@@ -55,23 +56,87 @@ WEATHER_CODE = {
 FONT_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 FONT_REG  = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
+SESSION = requests.Session()
 
-# ---- Helpers ----
-def fb_geometry():
-    """Return (W,H) detected from fbset. Fallback (480,320)."""
+
+# ---- Framebuffer utils ----
+def fb_info():
+    """
+    Returns (W,H,BPP).
+    We assume 16bpp (RGB565) if cannot detect.
+    """
+    W, H, BPP = 480, 320, 16
     try:
         out = subprocess.check_output(["fbset", "-fb", FB_DEV, "-s"], text=True, timeout=2)
         for line in out.splitlines():
             line = line.strip()
             if line.startswith("geometry"):
-                parts = line.split()
-                w = int(parts[1]); h = int(parts[2])
-                return w, h
+                # geometry 320 480 320 480 16
+                p = line.split()
+                W = int(p[1]); H = int(p[2])
+                if len(p) >= 6:
+                    BPP = int(p[5])
+                break
     except Exception:
         pass
-    return 480, 320
+    if BPP not in (16, 32):
+        BPP = 16
+    return W, H, BPP
 
 
+def rgb888_to_rgb565_bytes(img_rgb):
+    """
+    Convert PIL RGB image to RGB565 little-endian bytes.
+    """
+    # img_rgb: mode "RGB"
+    raw = img_rgb.tobytes()  # R,G,B...
+    out = bytearray((len(raw) // 3) * 2)
+    j = 0
+    for i in range(0, len(raw), 3):
+        r = raw[i]
+        g = raw[i + 1]
+        b = raw[i + 2]
+        rgb565 = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+        out[j] = rgb565 & 0xFF
+        out[j + 1] = (rgb565 >> 8) & 0xFF
+        j += 2
+    return out
+
+
+def write_to_fb(img, W, H, BPP):
+    """
+    Writes image to framebuffer. Supports 16bpp (RGB565) and 32bpp (XRGB8888-ish).
+    """
+    if img.mode != "RGB":
+        img = img.convert("RGB")
+
+    if img.size != (W, H):
+        img = img.resize((W, H), Image.BILINEAR)
+
+    try:
+        with open(FB_DEV, "wb", buffering=0) as fb:
+            if BPP == 16:
+                fb.write(rgb888_to_rgb565_bytes(img))
+            else:
+                # 32bpp fallback: write BGRA (approx) - some fbs expect XRGB.
+                # We'll write B,G,R,0 to be safe-ish.
+                raw = img.tobytes()
+                out = bytearray((len(raw) // 3) * 4)
+                j = 0
+                for i in range(0, len(raw), 3):
+                    r = raw[i]; g = raw[i+1]; b = raw[i+2]
+                    out[j] = b
+                    out[j+1] = g
+                    out[j+2] = r
+                    out[j+3] = 0
+                    j += 4
+                fb.write(out)
+    except Exception:
+        # If writing fails, do nothing (service will keep running).
+        pass
+
+
+# ---- Data helpers ----
 def get_local_ip():
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -79,13 +144,6 @@ def get_local_ip():
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except Exception:
-        return "N/A"
-
-
-def get_public_ip():
-    try:
-        return requests.get("https://api.ipify.org", timeout=5).text.strip()
     except Exception:
         return "N/A"
 
@@ -109,6 +167,31 @@ def iface_is_up(iface: str) -> bool:
     except Exception:
         pass
     return False
+
+
+def get_public_ip_cached():
+    # cache hit?
+    try:
+        if os.path.exists(CACHE_PUBLIC_IP):
+            c = json.load(open(CACHE_PUBLIC_IP, "r"))
+            if int(time.time()) - int(c.get("ts", 0)) < PUBLIC_IP_REFRESH_SEC:
+                return c.get("ip", "N/A")
+    except Exception:
+        pass
+
+    # fetch
+    ip = "N/A"
+    try:
+        ip = SESSION.get("https://api.ipify.org", timeout=5).text.strip()
+    except Exception:
+        pass
+
+    # save cache
+    try:
+        json.dump({"ts": int(time.time()), "ip": ip}, open(CACHE_PUBLIC_IP, "w"))
+    except Exception:
+        pass
+    return ip
 
 
 def read_cpu_temp_c():
@@ -161,7 +244,7 @@ def fetch_batumi_weather():
         "current_weather": True,
         "timezone": "auto",
     }
-    r = requests.get(url, params=params, timeout=6)
+    r = SESSION.get(url, params=params, timeout=6)
     r.raise_for_status()
     data = r.json()
     cw = data.get("current_weather", {})
@@ -172,26 +255,23 @@ def fetch_batumi_weather():
     return {"ts": int(time.time()), "temp": temp, "wind": wind, "code": code, "desc": desc, "icon": icon}
 
 
-def get_batumi_weather_cached():
-    # valid cache?
+def get_weather_cached():
     try:
-        if os.path.exists(CACHE_PATH):
-            cache = json.load(open(CACHE_PATH, "r"))
-            if int(time.time()) - int(cache.get("ts", 0)) < WEATHER_REFRESH_SEC:
-                return cache
+        if os.path.exists(CACHE_WEATHER):
+            c = json.load(open(CACHE_WEATHER, "r"))
+            if int(time.time()) - int(c.get("ts", 0)) < WEATHER_REFRESH_SEC:
+                return c
     except Exception:
         pass
 
-    # fetch + cache
     try:
         w = fetch_batumi_weather()
-        json.dump(w, open(CACHE_PATH, "w"))
+        json.dump(w, open(CACHE_WEATHER, "w"))
         return w
     except Exception:
-        # fallback to stale cache
         try:
-            if os.path.exists(CACHE_PATH):
-                return json.load(open(CACHE_PATH, "r"))
+            if os.path.exists(CACHE_WEATHER):
+                return json.load(open(CACHE_WEATHER, "r"))
         except Exception:
             pass
         return {"temp": None, "wind": None, "code": None, "desc": "N/A", "icon": "cloud"}
@@ -208,7 +288,7 @@ def draw_bar(draw, x, y, w, h, frac):
     draw.rectangle([x + 2, y + 2, x + 2 + int((w - 4) * frac), y + h - 2], fill="white")
 
 
-# ---- Weather icons (simple vector) ----
+# ---- Weather icons (vector-ish) ----
 def icon_sun(d, x, y, s):
     r = s // 3
     d.ellipse([x + r, y + r, x + s - r, y + s - r], outline="yellow", width=4)
@@ -269,129 +349,139 @@ def draw_weather_icon(d, kind, x, y, s):
         icon_cloud(d, x, y, s)
 
 
-# ---- Main render ----
-def render_once():
-    W, H = fb_geometry()
-
-    # layout tuning depending on orientation
+def build_fonts(W, H):
     pad = 12
     if W >= 480 and H <= 320:
-        title_sz = 34
-        med_sz = 22
-        sm_sz = 18
-        clock_sz = 58
-        date_sz = 18
+        title_sz, med_sz, sm_sz = 34, 22, 18
+        clock_sz, date_sz = 58, 18
         icon_size = 125
         desc_max = 20
     else:
-        # portrait-ish framebuffer
-        title_sz = 34
-        med_sz = 22
-        sm_sz = 18
-        clock_sz = 56
-        date_sz = 18
+        title_sz, med_sz, sm_sz = 34, 22, 18
+        clock_sz, date_sz = 56, 18
         icon_size = 135
         desc_max = 18
 
-    FONT_TITLE = ImageFont.truetype(FONT_BOLD, title_sz)
-    FONT_MED = ImageFont.truetype(FONT_REG, med_sz)
-    FONT_SM = ImageFont.truetype(FONT_REG, sm_sz)
-    FONT_CLOCK = ImageFont.truetype(FONT_BOLD, clock_sz)
-    FONT_DATE = ImageFont.truetype(FONT_REG, date_sz)
+    fonts = {
+        "pad": pad,
+        "title_sz": title_sz,
+        "med_sz": med_sz,
+        "sm_sz": sm_sz,
+        "clock_sz": clock_sz,
+        "date_sz": date_sz,
+        "icon_size": icon_size,
+        "desc_max": desc_max,
+        "FONT_TITLE": ImageFont.truetype(FONT_BOLD, title_sz),
+        "FONT_MED": ImageFont.truetype(FONT_REG, med_sz),
+        "FONT_SM": ImageFont.truetype(FONT_REG, sm_sz),
+        "FONT_CLOCK": ImageFont.truetype(FONT_BOLD, clock_sz),
+        "FONT_DATE": ImageFont.truetype(FONT_REG, date_sz),
+    }
+    return fonts
 
-    # data
-    clock = datetime.now().strftime("%H:%M")
-    date_line = datetime.now().strftime("%d %b %Y")
 
-    local_ip = get_local_ip()
-    public_ip = get_public_ip()
-    iface = get_default_iface()
-    link = "UP" if iface != "N/A" and iface_is_up(iface) else "DOWN"
+def render_loop():
+    W, H, BPP = fb_info()
+    cfg = build_fonts(W, H)
 
-    cpu_t = read_cpu_temp_c()
-    load = read_load()
-    mem = read_mem()
-    disk = read_disk_root()
-    weather = get_batumi_weather_cached()
-
-    # canvas
+    # reuse one image buffer to reduce allocations
     img = Image.new("RGB", (W, H), "black")
     d = ImageDraw.Draw(img)
 
-    # header left
-    d.text((pad, pad), "Batumi", font=FONT_TITLE, fill="white")
+    pad = cfg["pad"]
 
-    # big clock top-right
-    clock_w = d.textlength(clock, font=FONT_CLOCK)
-    d.text((W - pad - clock_w, pad - 2), clock, font=FONT_CLOCK, fill="white")
+    while True:
+        t0 = time.time()
 
-    # date under clock
-    date_w = d.textlength(date_line, font=FONT_DATE)
-    d.text((W - pad - date_w, pad + clock_sz - 6), date_line, font=FONT_DATE, fill="gray")
+        # data
+        clock = datetime.now().strftime("%H:%M")
+        date_line = datetime.now().strftime("%d %b %Y")
+        local_ip = get_local_ip()
+        public_ip = get_public_ip_cached()
+        iface = get_default_iface()
+        link = "UP" if iface != "N/A" and iface_is_up(iface) else "DOWN"
+        cpu_t = read_cpu_temp_c()
+        load = read_load()
+        mem = read_mem()
+        disk = read_disk_root()
+        weather = get_weather_cached()
 
-    # weather block
-    y_weather = pad + clock_sz + 18
-    icon_x = W - icon_size - pad
-    icon_y = y_weather - 10
-    draw_weather_icon(d, weather.get("icon", "cloud"), icon_x, icon_y, icon_size)
+        # clear background
+        d.rectangle([0, 0, W, H], fill="black")
 
-    desc = clamp(weather.get("desc", "N/A"), desc_max)
-    temp = weather.get("temp")
-    wind = weather.get("wind")
-    temp_str = f"{temp:.1f}°C" if isinstance(temp, (int, float)) else "N/A"
-    wind_str = f"{wind:.0f} km/h" if isinstance(wind, (int, float)) else "N/A"
+        # header left
+        d.text((pad, pad), "Batumi", font=cfg["FONT_TITLE"], fill="white")
 
-    d.text((pad, y_weather), f"Weather: {desc}", font=FONT_MED, fill="cyan")
-    d.text((pad, y_weather + med_sz + 6), f"Temp: {temp_str}", font=FONT_MED, fill="cyan")
-    d.text((pad, y_weather + (med_sz + 6) * 2), f"Wind: {wind_str}", font=FONT_MED, fill="cyan")
+        # big clock top-right
+        clock_w = d.textlength(clock, font=cfg["FONT_CLOCK"])
+        d.text((W - pad - clock_w, pad - 2), clock, font=cfg["FONT_CLOCK"], fill="white")
 
-    # network block (short labels)
-    y_net = y_weather + (med_sz + 6) * 3 + 10
-    d.text((pad, y_net), f"IF: {iface} ({link})", font=FONT_SM, fill="white")
-    d.text((pad, y_net + sm_sz + 6), f"LAN: {clamp(local_ip, 28)}", font=FONT_SM, fill="white")
-    d.text((pad, y_net + (sm_sz + 6) * 2), f"WAN: {clamp(public_ip, 28)}", font=FONT_SM, fill="white")
+        # date under clock
+        date_w = d.textlength(date_line, font=cfg["FONT_DATE"])
+        d.text((W - pad - date_w, pad + cfg["clock_sz"] - 6), date_line, font=cfg["FONT_DATE"], fill="gray")
 
-    # system block (bars)
-    y_sys = y_net + (sm_sz + 6) * 3 + 8
-    cpu_str = f"{cpu_t:.1f}°C" if cpu_t is not None else "N/A"
-    d.text((pad, y_sys), f"CPU: {cpu_str}", font=FONT_SM, fill="white")
-    if load is not None:
-        d.text((pad + 160, y_sys), f"Load: {load[0]:.2f}", font=FONT_SM, fill="white")
+        # weather block
+        y_weather = pad + cfg["clock_sz"] + 18
+        icon_size = cfg["icon_size"]
+        icon_x = W - icon_size - pad
+        icon_y = y_weather - 10
+        draw_weather_icon(d, weather.get("icon", "cloud"), icon_x, icon_y, icon_size)
 
-    y_sys2 = y_sys + sm_sz + 8
-    bar_x = pad + 175
-    bar_w = max(80, W - bar_x - pad)
+        desc = clamp(weather.get("desc", "N/A"), cfg["desc_max"])
+        temp = weather.get("temp")
+        wind = weather.get("wind")
+        temp_str = f"{temp:.1f}°C" if isinstance(temp, (int, float)) else "N/A"
+        wind_str = f"{wind:.0f} km/h" if isinstance(wind, (int, float)) else "N/A"
 
-    if mem is not None:
-        used, total = mem
-        frac = used / total if total > 0 else 0
-        d.text((pad, y_sys2), f"RAM: {used:.0f}/{total:.0f}MB", font=FONT_SM, fill="white")
-        draw_bar(d, bar_x, y_sys2 + 4, bar_w, 16, frac)
+        d.text((pad, y_weather), f"Weather: {desc}", font=cfg["FONT_MED"], fill="cyan")
+        d.text((pad, y_weather + cfg["med_sz"] + 6), f"Temp: {temp_str}", font=cfg["FONT_MED"], fill="cyan")
+        d.text((pad, y_weather + (cfg["med_sz"] + 6) * 2), f"Wind: {wind_str}", font=cfg["FONT_MED"], fill="cyan")
 
-    y_sys3 = y_sys2 + sm_sz + 10
-    if disk is not None:
-        used_g, total_g = disk
-        frac = used_g / total_g if total_g > 0 else 0
-        d.text((pad, y_sys3), f"Disk: {used_g:.1f}/{total_g:.1f}GB", font=FONT_SM, fill="white")
-        draw_bar(d, bar_x, y_sys3 + 4, bar_w, 16, frac)
+        # network block
+        y_net = y_weather + (cfg["med_sz"] + 6) * 3 + 10
+        d.text((pad, y_net), f"IF: {iface} ({link})", font=cfg["FONT_SM"], fill="white")
+        d.text((pad, y_net + cfg["sm_sz"] + 6), f"LAN: {clamp(local_ip, 28)}", font=cfg["FONT_SM"], fill="white")
+        d.text((pad, y_net + (cfg["sm_sz"] + 6) * 2), f"WAN: {clamp(public_ip, 28)}", font=cfg["FONT_SM"], fill="white")
 
-    img.save(IMG_PATH)
+        # system
+        y_sys = y_net + (cfg["sm_sz"] + 6) * 3 + 8
+        cpu_str = f"{cpu_t:.1f}°C" if cpu_t is not None else "N/A"
+        d.text((pad, y_sys), f"CPU: {cpu_str}", font=cfg["FONT_SM"], fill="white")
+        if load is not None:
+            d.text((pad + 160, y_sys), f"Load: {load[0]:.2f}", font=cfg["FONT_SM"], fill="white")
 
-    # IMPORTANT: no "-a" (avoid scaling/cropping)
-    subprocess.run(
-        ["fbi", "-T", "1", "-d", FB_DEV, "-noverbose", IMG_PATH],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL
-    )
+        y_sys2 = y_sys + cfg["sm_sz"] + 8
+        bar_x = pad + 175
+        bar_w = max(80, W - bar_x - pad)
+
+        if mem is not None:
+            used, total = mem
+            frac = used / total if total > 0 else 0
+            d.text((pad, y_sys2), f"RAM: {used:.0f}/{total:.0f}MB", font=cfg["FONT_SM"], fill="white")
+            draw_bar(d, bar_x, y_sys2 + 4, bar_w, 16, frac)
+
+        y_sys3 = y_sys2 + cfg["sm_sz"] + 10
+        if disk is not None:
+            used_g, total_g = disk
+            frac = used_g / total_g if total_g > 0 else 0
+            d.text((pad, y_sys3), f"Disk: {used_g:.1f}/{total_g:.1f}GB", font=cfg["FONT_SM"], fill="white")
+            draw_bar(d, bar_x, y_sys3 + 4, bar_w, 16, frac)
+
+        # write to framebuffer (no external processes)
+        write_to_fb(img, W, H, BPP)
+
+        # sleep remainder
+        dt = time.time() - t0
+        time.sleep(max(0.1, REFRESH_EVERY_SEC - dt))
 
 
 def main():
     while True:
         try:
-            render_once()
+            render_loop()
         except Exception:
-            pass
-        time.sleep(REFRESH_EVERY_SEC)
+            # if fb rotated / mode changed, re-detect
+            time.sleep(2)
 
 
 if __name__ == "__main__":
