@@ -4,12 +4,12 @@ This script is for SPI GPIO (480x320) Display status output
 
 
 ##INSTALL PREREQS
-
+```
 download proper from hosyond.com
 sudo apt update
 sudo apt install -y python3-pip fbi fonts-dejavu-core
 pip3 install pillow requests --break-system-packages
-
+```
 
 sudo python3 /home/admin/RPI/status_lcd.py
 
