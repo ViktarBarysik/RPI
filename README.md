@@ -17,6 +17,7 @@ sudo python3 /home/admin/RPI/status_lcd.py
 
 sudo vim /etc/systemd/system/lcd-dashboard.service :
 ---------------
+```
 [Unit]
 Description=SPI LCD Dashboard (Batumi weather + IPs + system stats)
 After=network-online.target
@@ -31,15 +32,20 @@ User=root
 
 [Install]
 WantedBy=multi-user.target
+```
 ---------------
 
 services:
+```
 sudo systemctl daemon-reload
 sudo systemctl enable lcd-dashboard.service
 sudo systemctl start lcd-dashboard.service
+```
 
 logs:
+```
 sudo journalctl -u lcd-dashboard.service -f
+```
 
 
 restart:
